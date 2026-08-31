@@ -13,8 +13,14 @@ app.py（画面側）は、このモジュールの find_candidates() / update_s
 などを呼び出すだけで連携できるようにしている。
 
 認証情報について:
-    サービスアカウントJSONの中身は一切コードに書かず、.envで指定した
-    ファイルパス（GOOGLE_SERVICE_ACCOUNT_FILE）から都度読み込む。
+    サービスアカウントJSONの中身は一切コードに書かず、次の優先順位で取得する。
+
+    1. Streamlit Community CloudのSecrets
+       （st.secrets["gcp_service_account"]。サービスアカウントJSONの各キーを
+       .streamlit/secrets.tomlに[gcp_service_account]セクションとして
+       設定したもの。JSONファイル自体はGitHubにコミットしない）
+    2. ローカル環境の.envで指定したファイルパス（GOOGLE_SERVICE_ACCOUNT_FILE）
+       から読み込むサービスアカウントJSONファイル（従来どおり）
 """
 
 import os
@@ -78,20 +84,55 @@ class Candidate:
     product_name: str  # B列: 商品名
 
 
+def _get_credentials() -> Credentials:
+    """サービスアカウント認証情報を次の優先順位で取得する。
+
+    1. Streamlit Community CloudのSecrets
+       （st.secrets["gcp_service_account"]。サービスアカウントJSONの各キーを
+       .streamlit/secrets.tomlに[gcp_service_account]セクションとして
+       そのまま設定したもの）
+    2. ローカル環境の.env / 環境変数（GOOGLE_SERVICE_ACCOUNT_FILE）に
+       指定されたサービスアカウントJSONファイル
+
+    streamlitが未インストールの場合や、Streamlit実行環境外（他のスクリプトや
+    テストからsheets_client.pyを直接使う場合）、またはSecrets未設定の場合は、
+    エラーにせず.envファイル側の読み込みへフォールバックする。
+
+    Raises:
+        RuntimeError: どちらの方法でも認証情報が見つからない、または
+            指定されたファイルが存在しない場合
+    """
+    try:
+        import streamlit as st
+
+        if "gcp_service_account" in st.secrets:
+            info = dict(st.secrets["gcp_service_account"])
+            return Credentials.from_service_account_info(info, scopes=SCOPES)
+    except Exception:
+        # streamlit未インストール／Streamlit実行環境外／secrets.toml未作成など。
+        # いずれの場合もエラーにせず.envファイル側の読み込みにフォールバックする。
+        pass
+
+    if not CREDENTIALS_FILE:
+        raise RuntimeError(
+            "Googleサービスアカウントの認証情報が見つかりません。\n"
+            "・Streamlit Cloudの場合: Secretsに[gcp_service_account]として"
+            "サービスアカウントJSONの内容を設定してください"
+            "（.streamlit/secrets.toml.exampleを参考にしてください）。\n"
+            "・ローカル環境の場合: .envファイルのGOOGLE_SERVICE_ACCOUNT_FILEに"
+            "サービスアカウントJSONファイルのパスを設定してください"
+            "（.env.exampleを参考にしてください）。"
+        )
+    if not os.path.exists(CREDENTIALS_FILE):
+        raise RuntimeError(f"認証ファイルが見つかりません: {CREDENTIALS_FILE}")
+    return Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+
+
 def _get_client() -> gspread.Client:
     """gspread.Clientを作成（未作成の場合のみ）して返す。"""
     global _client
     if _client is None:
-        if not CREDENTIALS_FILE:
-            raise RuntimeError(
-                "GOOGLE_SERVICE_ACCOUNT_FILEが設定されていません。.envファイルに"
-                "サービスアカウントJSONファイルのパスを設定してください。"
-            )
-        if not os.path.exists(CREDENTIALS_FILE):
-            raise RuntimeError(f"認証ファイルが見つかりません: {CREDENTIALS_FILE}")
-        credentials = Credentials.from_service_account_file(
-            CREDENTIALS_FILE, scopes=SCOPES
-        )
+        credentials = _get_credentials()
         _client = gspread.authorize(credentials)
     return _client
 
