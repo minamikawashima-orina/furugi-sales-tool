@@ -23,7 +23,31 @@ from pydantic import BaseModel, Field
 # .env ファイルから環境変数を読み込む（GEMINI_API_KEYなど）
 load_dotenv()
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+
+def _get_api_key() -> str | None:
+    """GEMINI_API_KEYを次の優先順位で取得する。
+
+    1. Streamlit Community CloudのSecrets（st.secrets["GEMINI_API_KEY"]）
+    2. ローカル環境の.env / 環境変数（GEMINI_API_KEY）
+
+    streamlitが未インストールの場合や、Streamlit実行環境外（他のスクリプトや
+    テストからgemini_client.pyを直接使う場合）、またはSecrets未設定の場合は、
+    エラーにせず.env側の値へフォールバックする。
+    """
+    try:
+        import streamlit as st
+
+        if "GEMINI_API_KEY" in st.secrets:
+            return st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        # streamlit未インストール／Streamlit実行環境外／secrets.toml未作成など。
+        # いずれの場合もエラーにせず.env側の取得にフォールバックする。
+        pass
+
+    return os.getenv("GEMINI_API_KEY")
+
+
+API_KEY = _get_api_key()
 MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
 
 _client = None  # genai.Client は初回利用時に作成する（遅延初期化）
