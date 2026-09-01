@@ -3,14 +3,17 @@ Googleスプレッドシートとの連携をまとめたモジュール。
 
 役割:
     サービスアカウント認証でGoogle Sheetsに接続し、B列「商品名」を
-    Geminiの「商品タイトル」で検索して対象行を特定し、P列「売却日」・
-    Q列「売却価格」・S列「配送料」だけを書き込む。
+    Geminiの「商品タイトル」で検索して対象行を特定し、次のいずれかを書き込む。
+
+    - 売却情報登録: P列「売却日」・Q列「売却価格」・S列「配送料」
+    - 出品情報登録: B列「商品名」・E列「ブランド」（取得できた場合のみ）・
+      F列（出品価格）・O列（出品日時。登録実行時の日本時間を自動取得）
 
     販売手数料・利益はスプレッドシート側の数式で自動計算される想定の
     ため、このモジュールからは一切書き込まない。
 
-app.py（画面側）は、このモジュールの find_candidates() / update_sale()
-などを呼び出すだけで連携できるようにしている。
+app.py（画面側）は、このモジュールの find_candidates() / update_sale() /
+update_listing() などを呼び出すだけで連携できるようにしている。
 
 認証情報について:
     サービスアカウントJSONの中身は一切コードに書かず、次の優先順位で取得する。
@@ -27,6 +30,8 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 import gspread
@@ -49,11 +54,17 @@ SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "vv古着売上管理")
 # スプレッドシート上の列番号（A列=1, B列=2, ...）
 COL_MANAGEMENT_NO = 1  # A列: 管理番号
 COL_PRODUCT_NAME = 2  # B列: 商品名
+COL_BRAND = 5  # E列: ブランド
+COL_LISTING_PRICE = 6  # F列: 出品価格
+COL_LISTED_AT = 15  # O列: 出品日時
 COL_SOLD_AT = 16  # P列: 売却日
 COL_SOLD_PRICE = 17  # Q列: 売却価格
 COL_SHIPPING_FEE = 19  # S列: 配送料（R列は手数料等の自動計算列のため触れない）
 
 HEADER_ROW = 1  # 1行目はヘッダー想定（2行目以降がデータ）
+
+# 出品日時（O列）に登録する日本時間のタイムゾーン
+JST = ZoneInfo("Asia/Tokyo")
 
 # 特徴語（トークン）として使う最小の文字数。
 # 「L」「S」等のサイズ表記1文字は特徴語として扱わない。
@@ -169,6 +180,29 @@ def extract_number(price_text: str) -> int | None:
     """
     digits = re.sub(r"[^\d]", "", price_text)
     return int(digits) if digits else None
+
+
+def extract_brand(brand_text: str) -> str | None:
+    """
+    Geminiの「ブランド」文字列から、有効なブランド名を取り出す。
+
+    ブランドが画像から読み取れなかった場合（"不明"や空文字など）は、
+    E列を更新しないことを呼び出し側で判断できるようにNoneを返す。
+    """
+    text = brand_text.strip()
+    if not text or text == "不明":
+        return None
+    return text
+
+
+def now_jst_str() -> str:
+    """
+    現在の日本時間（Asia/Tokyo）を "YYYY/MM/DD HH:MM" 形式の文字列で返す。
+
+    出品日時（O列）はGeminiに解析させず、この関数で登録実行時点の
+    現在時刻を取得して使用する。
+    """
+    return datetime.now(JST).strftime("%Y/%m/%d %H:%M")
 
 
 def _normalize(text: str) -> str:
@@ -290,3 +324,32 @@ def update_sale(row: int, sold_at: str, sold_price: int, shipping_fee: int) -> N
             {"range": f"S{row}", "values": [[shipping_fee]]},
         ]
     )
+
+
+def update_listing(row: int, title: str, price: int, brand: str | None = None) -> None:
+    """
+    指定行のB列（商品名）・E列（ブランド）・F列（出品価格）・O列（出品日時）を更新する。
+
+    E列（ブランド）は、brandがNone（画像からブランドを読み取れなかった場合）の
+    ときは更新しない。
+
+    出品日時（O列）はGeminiに解析させず、この関数の呼び出し時点（＝スプレッド
+    シートへの登録実行時点）の日本時間を自動取得して書き込む。
+
+    Args:
+        row: 更新対象のスプレッドシート上の行番号（1始まり）
+        title: B列に書き込む商品タイトル（Geminiが読み取った値）
+        price: F列に書き込む出品価格（数値）
+        brand: E列に書き込むブランド名。None（未取得）の場合はE列を更新しない。
+    """
+    listed_at = now_jst_str()
+    worksheet = _get_worksheet()
+
+    updates = [{"range": f"B{row}", "values": [[title]]}]
+    if brand:
+        updates.append({"range": f"E{row}:F{row}", "values": [[brand, price]]})
+    else:
+        updates.append({"range": f"F{row}", "values": [[price]]})
+    updates.append({"range": f"O{row}", "values": [[listed_at]]})
+
+    worksheet.batch_update(updates)

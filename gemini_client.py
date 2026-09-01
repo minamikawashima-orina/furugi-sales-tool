@@ -6,8 +6,12 @@ Gemini APIとの通信をまとめたモジュール。
     解析させて、商品情報（ブランド・ジャンル・価格など）を日本語キーの
     dict形式で返す。
 
-app.py（画面側）は、このモジュールの analyze_mercari_image() を
-呼び出すだけで解析結果を受け取れるようにしている。
+    売却後画面の解析（analyze_mercari_image）に加えて、出品画面の解析
+    （analyze_mercari_listing_image）も提供する。
+
+app.py（画面側）は、このモジュールの analyze_mercari_image() /
+analyze_mercari_listing_image() を呼び出すだけで解析結果を受け取れるように
+している。
 
 使用SDK: google-genai（旧 google-generativeai は2025年11月末で
 サポート終了・アーカイブ済みのため使用しない）
@@ -146,3 +150,84 @@ def analyze_mercari_image(image_bytes: bytes, mime_type: str) -> dict:
         ) from e
 
     return {FIELD_LABELS[key]: value for key, value in item.model_dump().items()}
+
+
+class MercariListingItem(BaseModel):
+    """Geminiに読み取らせる3項目（メルカリの出品画面に表示される項目）。
+
+    出品日時はGeminiに読み取らせず、登録実行時にPython側で現在時刻
+    （日本時間）を取得するため、取得項目に含めない。
+    """
+
+    title: str = Field(description="商品タイトル")
+    price: str = Field(description="出品価格")
+    brand: str = Field(description="ブランド（画像から読み取れない場合は「不明」）")
+
+
+# 画面表示用: 英語フィールド名 → 日本語ラベル（出品画面解析用）
+LISTING_FIELD_LABELS = {
+    "title": "商品タイトル",
+    "price": "出品価格",
+    "brand": "ブランド",
+}
+
+LISTING_PROMPT = """
+これはフリマアプリ「メルカリ」の出品画面（出品時の商品情報を入力・確認する画面）の
+スクリーンショットです。
+画像から次の3項目を読み取ってください。
+
+- 商品タイトル: 商品名
+- 出品価格: 出品時に設定されている価格
+- ブランド: 商品のブランド名（画像にブランド名が表示されている場合のみ）
+
+重要な注意事項:
+- 画像に実際に表示されている情報だけを読み取ってください。
+- ブランドが画像に表示されていない、または「ブランドなし」等と表示されている場合は、
+  推測せずに "不明" としてください。
+- 商品タイトルや価格についても、画像に表示されていない項目は絶対に推測や計算で
+  値を埋めないでください。その項目は "不明" としてください。
+- 数値の項目も文字列として出力してください（単位があれば単位も含める）。
+"""
+
+
+def analyze_mercari_listing_image(image_bytes: bytes, mime_type: str) -> dict:
+    """
+    メルカリの出品画面のスクリーンショット画像を解析し、結果を日本語キーのdictで返す。
+
+    Args:
+        image_bytes: 画像ファイルのバイト列
+        mime_type: 画像のMIMEタイプ（例: "image/png", "image/jpeg"）
+
+    Returns:
+        dict: {"商品タイトル": ..., "出品価格": ..., "ブランド": ...} の3項目
+            （ブランドが画像から読み取れなかった場合は "不明" が入る）
+
+    Raises:
+        RuntimeError: APIキーが未設定の場合
+        ValueError: Geminiからの応答をJSONとして解釈できなかった場合
+    """
+    client = _get_client()
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    interaction = client.interactions.create(
+        model=MODEL_NAME,
+        input=[
+            {"type": "text", "text": LISTING_PROMPT},
+            {"type": "image", "data": image_b64, "mime_type": mime_type},
+        ],
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": MercariListingItem.model_json_schema(),
+        },
+    )
+
+    try:
+        item = MercariListingItem.model_validate_json(interaction.output_text)
+    except Exception as e:
+        raise ValueError(
+            f"Geminiの応答をJSONとして解釈できませんでした: {e}\n"
+            f"応答内容: {getattr(interaction, 'output_text', interaction)}"
+        ) from e
+
+    return {LISTING_FIELD_LABELS[key]: value for key, value in item.model_dump().items()}
