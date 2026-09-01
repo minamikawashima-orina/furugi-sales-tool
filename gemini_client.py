@@ -20,6 +20,7 @@ analyze_mercari_listing_image() を呼び出すだけで解析結果を受け取
 import os
 import base64
 
+import httpx
 from dotenv import load_dotenv
 from google import genai
 from pydantic import BaseModel, Field
@@ -68,6 +69,88 @@ def _get_client() -> genai.Client:
             )
         _client = genai.Client(api_key=API_KEY)
     return _client
+
+
+# Gemini APIへのリクエストが応答を返さないまま無期限に待機し続けることが
+# ないよう、タイムアウト（秒）を明示的に設定する。
+#
+# _smoketest.py（テキストのみ）ではtimeout=20、_smoketest_image.py（画像あり）
+# ではtimeout=30を使用しているが、実際の解析ではさらに構造化出力（JSON
+# スキーマ指定）も伴い、画像の内容によってはより時間がかかる場合があるため、
+# 余裕を持たせてこの値を設定している。
+#
+# 売却情報解析（analyze_mercari_image）・出品情報解析
+# （analyze_mercari_listing_image）の両方でこの値を共通利用する。
+GEMINI_REQUEST_TIMEOUT_SECONDS = 45
+
+# タイムアウト発生時にStreamlit画面へ表示する、ユーザー向けの分かりやすい
+# メッセージ。原因（HTTPクライアントの例外の詳細等）はログにも画面にも
+# 出さず、この文言だけを表示する。
+TIMEOUT_ERROR_MESSAGE = (
+    "Geminiの解析に時間がかかりすぎたため、処理を終了しました。もう一度お試しください。"
+)
+
+
+def _is_timeout_error(error: BaseException) -> bool:
+    """
+    Gemini APIへのリクエストがタイムアウトしたことを表す例外かどうかを判定する。
+
+    使用しているgoogle-genai SDKは、内部で使用しているHTTPクライアント
+    （httpx）のタイムアウト例外を、SDK独自のエラークラスにラップすることが
+    あり、かつそのクラスはSDKの非公開モジュール（アンダースコア始まりの
+    パッケージ）にしか存在しない。そのため特定のクラスを直接インポートして
+    isinstanceで判定するのではなく、次のいずれかで判定する（SDKの内部実装が
+    変わってもタイムアウト検知が壊れにくいようにするため）。
+
+    - httpx（google-genaiが内部で使用するHTTPクライアント）自体の
+      タイムアウト例外（httpx.TimeoutException）であるか
+    - 例外クラス名に "Timeout" が含まれるか（SDKがラップした場合や、
+      将来的に別のクラスでラップされた場合の保険）
+    """
+    if isinstance(error, httpx.TimeoutException):
+        return True
+    return "timeout" in type(error).__name__.lower()
+
+
+def _create_interaction(prompt: str, image_b64: str, mime_type: str, schema: dict):
+    """
+    Gemini APIへの画像解析リクエスト（interactions.create呼び出し）を、
+    共通のタイムアウト設定・タイムアウト時のエラーメッセージ付きで実行する。
+
+    analyze_mercari_image() / analyze_mercari_listing_image() の両方から
+    共通で呼び出すことで、タイムアウト設定を一箇所（GEMINI_REQUEST_TIMEOUT_SECONDS）
+    にまとめて管理できるようにしている。
+
+    Args:
+        prompt: Geminiに渡すプロンプト文字列
+        image_b64: Base64エンコードされた画像データ
+        mime_type: 画像のMIMEタイプ
+        schema: 応答に期待するJSONスキーマ（pydanticモデルのmodel_json_schema()）
+
+    Raises:
+        RuntimeError: APIキーが未設定の場合
+        TimeoutError: GEMINI_REQUEST_TIMEOUT_SECONDS秒以内にGemini APIから
+            応答が返ってこなかった場合（画面にはTIMEOUT_ERROR_MESSAGEを表示する）
+    """
+    client = _get_client()
+    try:
+        return client.interactions.create(
+            model=MODEL_NAME,
+            input=[
+                {"type": "text", "text": prompt},
+                {"type": "image", "data": image_b64, "mime_type": mime_type},
+            ],
+            response_format={
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": schema,
+            },
+            timeout=GEMINI_REQUEST_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        if _is_timeout_error(e):
+            raise TimeoutError(TIMEOUT_ERROR_MESSAGE) from e
+        raise
 
 
 class MercariItem(BaseModel):
@@ -123,22 +206,14 @@ def analyze_mercari_image(image_bytes: bytes, mime_type: str) -> dict:
 
     Raises:
         RuntimeError: APIキーが未設定の場合
+        TimeoutError: Gemini APIの応答がGEMINI_REQUEST_TIMEOUT_SECONDS秒以内に
+            返ってこなかった場合
         ValueError: Geminiからの応答をJSONとして解釈できなかった場合
     """
-    client = _get_client()
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    interaction = client.interactions.create(
-        model=MODEL_NAME,
-        input=[
-            {"type": "text", "text": PROMPT},
-            {"type": "image", "data": image_b64, "mime_type": mime_type},
-        ],
-        response_format={
-            "type": "text",
-            "mime_type": "application/json",
-            "schema": MercariItem.model_json_schema(),
-        },
+    interaction = _create_interaction(
+        PROMPT, image_b64, mime_type, MercariItem.model_json_schema()
     )
 
     try:
@@ -204,22 +279,14 @@ def analyze_mercari_listing_image(image_bytes: bytes, mime_type: str) -> dict:
 
     Raises:
         RuntimeError: APIキーが未設定の場合
+        TimeoutError: Gemini APIの応答がGEMINI_REQUEST_TIMEOUT_SECONDS秒以内に
+            返ってこなかった場合
         ValueError: Geminiからの応答をJSONとして解釈できなかった場合
     """
-    client = _get_client()
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    interaction = client.interactions.create(
-        model=MODEL_NAME,
-        input=[
-            {"type": "text", "text": LISTING_PROMPT},
-            {"type": "image", "data": image_b64, "mime_type": mime_type},
-        ],
-        response_format={
-            "type": "text",
-            "mime_type": "application/json",
-            "schema": MercariListingItem.model_json_schema(),
-        },
+    interaction = _create_interaction(
+        LISTING_PROMPT, image_b64, mime_type, MercariListingItem.model_json_schema()
     )
 
     try:

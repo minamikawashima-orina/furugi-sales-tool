@@ -56,6 +56,11 @@ with tab_sale:
             with st.spinner("Gemini APIで画像を解析中..."):
                 try:
                     result = analyze_mercari_image(image_bytes, uploaded_file.type)
+                except TimeoutError as e:
+                    # Gemini APIへのリクエストがタイムアウトした場合。
+                    # 原因の詳細は表示せず、分かりやすいメッセージのみ表示する。
+                    st.error(str(e))
+                    st.session_state.pop("analysis_result", None)
                 except Exception as e:
                     st.error(f"解析中にエラーが発生しました: {e}")
                     st.session_state.pop("analysis_result", None)
@@ -174,6 +179,11 @@ with tab_listing:
                     listing_result = analyze_mercari_listing_image(
                         listing_image_bytes, listing_uploaded_file.type
                     )
+                except TimeoutError as e:
+                    # Gemini APIへのリクエストがタイムアウトした場合。
+                    # 原因の詳細は表示せず、分かりやすいメッセージのみ表示する。
+                    st.error(str(e))
+                    st.session_state.pop("listing_analysis_result", None)
                 except Exception as e:
                     st.error(f"解析中にエラーが発生しました: {e}")
                     st.session_state.pop("listing_analysis_result", None)
