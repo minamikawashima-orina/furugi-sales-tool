@@ -4,13 +4,15 @@
 メルカリのスクリーンショットをアップロードすると、Gemini APIが
 商品情報（ブランド・ジャンル・価格など）を自動で読み取って画面に表示する。
 
-さらに、読み取った「商品タイトル」でGoogleスプレッドシート（B列「商品名」）
-を検索し、一致した行のA列「管理番号」を特定した上で、確認画面を経て
-以下のいずれかを書き込む。
+さらに、確認画面を経てGoogleスプレッドシートに以下のいずれかを書き込む。
 
-- 売却情報を登録: P列「売却日」・Q列「売却価格」・S列「配送料」
-- 出品情報を登録: B列「商品名」・E列「ブランド」（取得できた場合のみ）・
-  F列（出品価格）・O列（出品日時。登録実行時点の日本時間を自動取得）
+- 売却情報を登録: 読み取った「商品タイトル」でB列「商品名」を検索し、
+  一致した行のA列「管理番号」を特定した上で、P列「売却日」・Q列「売却価格」・
+  S列「配送料」を書き込む。
+- 出品情報を登録: B列「商品名」を上から確認し、最初に見つかった空欄の行に、
+  B列「商品名」・E列「ブランド」（取得できた場合のみ）・F列（出品価格）・
+  O列（出品日時。登録実行時点の日本時間を自動取得）を書き込む
+  （商品名からの候補検索・選択は行わない）。
 
 販売手数料・利益はスプレッドシート側の数式で自動計算されるため、
 このツールからは一切書き込まない。
@@ -190,7 +192,7 @@ with tab_listing:
                 else:
                     st.session_state["listing_analysis_result"] = listing_result
                     # 新しく解析し直した場合、前回のスプレッドシート検索結果は破棄する
-                    st.session_state.pop("listing_sheet_candidates", None)
+                    st.session_state.pop("listing_target_row", None)
                     st.session_state.pop("listing_sheet_error", None)
 
         listing_result = st.session_state.get("listing_analysis_result")
@@ -201,66 +203,42 @@ with tab_listing:
             st.subheader("解析結果")
             st.table([{"項目": key, "値": value} for key, value in listing_result.items()])
 
-            # 4. Googleスプレッドシートから対象商品（B列「商品名」）を検索する
-            #    （既存の売却情報登録機能と同じfind_candidates()をそのまま再利用する）
-            if "listing_sheet_candidates" not in st.session_state:
-                with st.spinner("スプレッドシートで対象商品を検索中..."):
+            # 4. Googleスプレッドシートで登録先の行（B列「商品名」が空欄の
+            #    一番上の行）を探す。商品名からの候補検索・選択は行わない。
+            if "listing_target_row" not in st.session_state:
+                with st.spinner("スプレッドシートで登録先の行を検索中..."):
                     try:
-                        listing_candidates = sheets_client.find_candidates(
-                            listing_result.get("商品タイトル", "")
-                        )
+                        listing_target_row = sheets_client.find_first_empty_listing_row()
                     except Exception as e:
-                        st.session_state["listing_sheet_candidates"] = None
+                        st.session_state["listing_target_row"] = None
                         st.session_state["listing_sheet_error"] = str(e)
                     else:
-                        st.session_state["listing_sheet_candidates"] = listing_candidates
+                        st.session_state["listing_target_row"] = listing_target_row
                         st.session_state["listing_sheet_error"] = None
 
             st.subheader("スプレッドシートへの登録")
 
             listing_sheet_error = st.session_state.get("listing_sheet_error")
-            listing_candidates = st.session_state.get("listing_sheet_candidates")
+            listing_target_row = st.session_state.get("listing_target_row")
 
             if listing_sheet_error:
                 # 検索そのものが失敗した場合（認証エラー・シートが見つからない等）
                 st.error(f"スプレッドシートの検索中にエラーが発生しました: {listing_sheet_error}")
-            elif not listing_candidates:
-                # B列に一致する商品がない場合は登録せず、エラーを表示する
-                st.error(
-                    "スプレッドシート上に一致する商品が見つかりませんでした。"
-                    "商品名（B列）を確認してください。"
-                )
+            elif listing_target_row is None:
+                # B列に空欄の行がない場合は登録せず、エラーを表示する
+                st.error("登録できる空き行がありません。")
             else:
-                if len(listing_candidates) == 1:
-                    listing_selected = listing_candidates[0]
-                else:
-                    # 複数の商品が一致した場合は候補を表示し、選んで確認できるようにする
-                    st.warning(
-                        f"{len(listing_candidates)}件の商品が一致しました。"
-                        "登録する商品を選択してください。"
-                    )
-                    listing_options = {
-                        f"管理番号: {c.management_no} / 商品名: {c.product_name}": c
-                        for c in listing_candidates
-                    }
-                    listing_choice = st.radio(
-                        "対象商品を選択してください",
-                        list(listing_options.keys()),
-                        key="listing_candidate_radio",
-                    )
-                    listing_selected = listing_options[listing_choice]
-
                 listing_title = listing_result.get("商品タイトル", "")
                 listing_price = sheets_client.extract_number(listing_result.get("出品価格", ""))
                 listing_brand = sheets_client.extract_brand(listing_result.get("ブランド", ""))
 
-                # 登録前に、選択した内容を画面に表示する
+                # 登録前に、登録先の行と内容を画面に表示する
                 # （出品日時O列は、実際には「登録する」ボタンを押した時点の日本時間が
                 #   登録されるため、確認表示は目安であることが分かるようにしている）
                 st.write("以下の内容でスプレッドシートに登録します。")
                 st.table(
                     [
-                        {"項目": "管理番号（A列）", "値": listing_selected.management_no},
+                        {"項目": "登録先の行", "値": f"{listing_target_row}行目"},
                         {"項目": "商品名（B列）", "値": listing_title},
                         {
                             "項目": "ブランド（E列）",
@@ -279,11 +257,9 @@ with tab_listing:
                 elif st.button("登録する", key="listing_register_button"):
                     try:
                         sheets_client.update_listing(
-                            listing_selected.row, listing_title, listing_price, listing_brand
+                            listing_target_row, listing_title, listing_price, listing_brand
                         )
                     except Exception as e:
                         st.error(f"スプレッドシートへの登録中にエラーが発生しました: {e}")
                     else:
-                        st.success(
-                            f"管理番号「{listing_selected.management_no}」の行に登録しました！"
-                        )
+                        st.success(f"{listing_target_row}行目に登録しました！")

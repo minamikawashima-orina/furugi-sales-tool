@@ -2,18 +2,21 @@
 Googleスプレッドシートとの連携をまとめたモジュール。
 
 役割:
-    サービスアカウント認証でGoogle Sheetsに接続し、B列「商品名」を
-    Geminiの「商品タイトル」で検索して対象行を特定し、次のいずれかを書き込む。
+    サービスアカウント認証でGoogle Sheetsに接続し、次のいずれかを書き込む。
 
-    - 売却情報登録: P列「売却日」・Q列「売却価格」・S列「配送料」
-    - 出品情報登録: B列「商品名」・E列「ブランド」（取得できた場合のみ）・
-      F列（出品価格）・O列（出品日時。登録実行時の日本時間を自動取得）
+    - 売却情報登録: B列「商品名」をGeminiの「商品タイトル」で検索して
+      対象行を特定し、P列「売却日」・Q列「売却価格」・S列「配送料」を書き込む。
+    - 出品情報登録: B列「商品名」を上から確認し、最初に見つかった空欄の行を
+      登録先として、B列「商品名」・E列「ブランド」（取得できた場合のみ）・
+      F列（出品価格）・O列（出品日時。登録実行時の日本時間を自動取得）を書き込む。
+      （商品名からの候補検索・選択は行わない）
 
     販売手数料・利益はスプレッドシート側の数式で自動計算される想定の
     ため、このモジュールからは一切書き込まない。
 
 app.py（画面側）は、このモジュールの find_candidates() / update_sale() /
-update_listing() などを呼び出すだけで連携できるようにしている。
+find_first_empty_listing_row() / update_listing() などを呼び出すだけで
+連携できるようにしている。
 
 認証情報について:
     サービスアカウントJSONの中身は一切コードに書かず、次の優先順位で取得する。
@@ -299,6 +302,27 @@ def find_candidates(title: str) -> list[Candidate]:
                 Candidate(row=i, management_no=management_no, product_name=product_name)
             )
     return candidates
+
+
+def find_first_empty_listing_row() -> int | None:
+    """
+    B列「商品名」を上から確認し、最初に見つかった空欄の行番号を返す。
+
+    出品情報登録では、商品タイトルからの候補検索は行わず、この関数で
+    特定した空き行にそのまま登録する。
+
+    Returns:
+        int | None: 最初に見つかった空欄行の行番号（1始まり）。
+            空欄の行が見つからない場合はNone。
+    """
+    worksheet = _get_worksheet()
+    values = worksheet.get_all_values()
+
+    for i, row in enumerate(values[HEADER_ROW:], start=HEADER_ROW + 1):
+        product_name = row[COL_PRODUCT_NAME - 1] if len(row) >= COL_PRODUCT_NAME else ""
+        if not product_name.strip():
+            return i
+    return None
 
 
 def update_sale(row: int, sold_at: str, sold_price: int, shipping_fee: int) -> None:
